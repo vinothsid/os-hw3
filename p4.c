@@ -298,6 +298,9 @@ bool insert(char *movie,char *country,char *numVotes,char *rating,char *year) {
 						if ( strcmp(t->country,country)==0 && t->year == yr ) {
 							toRemove = t;
 						
+#ifdef DEBUG
+					printf("Removing old movie : %s\n" ,toRemove->movie );
+#endif
 							if(hashTable[index].end == toRemove) {
 								hashTable[index].end = prev;
 								lll_unlock(&hashLock);
@@ -398,7 +401,7 @@ void *threadFunc( void *info ) {
 	int start = offsets[cIndex][index].sIndex;
 	int end = offsets[cIndex][index].eIndex;
 
-	if(start == 0 || end == 0)
+	if(start == 0 && end == 0)
 		return;
 	int i=0;
 	do {
