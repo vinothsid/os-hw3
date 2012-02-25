@@ -2,6 +2,7 @@
 #include<string.h>
 #include<assert.h>
 #include<stdbool.h>
+#include<pthread.h>
 #include "myatomic.h"
 #define MAX_MOVIE_LEN 51
 #define MAX_COUNTRY_LEN 51
@@ -11,6 +12,7 @@
 #define MAX_BUFFER_SIZE 1024*1024*10 // 10 mb
 #define HASH_TABLE_SIZE 257
 
+pthread_mutex_t debugLock = PTHREAD_MUTEX_INITIALIZER;
 #define DEBUG
 
 struct block {
@@ -36,9 +38,37 @@ struct hashNode {
 } hashTable[HASH_TABLE_SIZE];
 
 
+struct threadInfo {
+	int countryIndex;
+	int threadId;
+};
+
+typedef struct threadInfo ThreadInfo;
+
 char countries[MAX_NUM_COUNTRY][MAX_COUNTRY_LEN];
 char buffer[MAX_NUM_COUNTRY][MAX_BUFFER_SIZE];
 int numCountries;
+int hashLock=1;
+
+/*
+*local low level lock based on compare and swap to ensure atomicity 
+*/
+
+static int lll_lock(int* lll_val) {
+        while(1) {
+                while(*lll_val!=1) {
+                }
+                        if(compare_and_swap(lll_val,0,1))  {
+                                return;
+                        }//spin here
+        }
+}
+/*
+*unlocks the low level lock
+*/
+static int lll_unlock(int* lll_val) {
+        *lll_val=1;
+}
 
 int getCountries(char *fileName) {
         FILE *fp;
@@ -132,7 +162,7 @@ int findOffsets(char *fileContent, int threadCount,struct block * fBlocks ) {
 	
         int tc=threadCount;
         int remChars = size;
-        for(i=0;i<threadCount && end < size;i++) {
+        for(i=0;i<threadCount && end+1 < size;i++) {
                 blockSize = remChars/tc;
                 if( (start+blockSize-1 ) <= size ) {
                         end=end+blockSize;
@@ -141,6 +171,16 @@ int findOffsets(char *fileContent, int threadCount,struct block * fBlocks ) {
                         newLine = fileContent[end++];
                 } while(newLine!='\n' && newLine!='\0');
 
+/*
+		if(newLine == '\n')
+			printf("Newline found\n");
+		else if(newLine == '\0')
+			printf("Null found\n");
+		else
+			printf("Should not be printed\n");
+
+		printf("i:%d End : %d size: %d\n",i,end , size);
+*/		end--;
 		(fBlocks+i)->sIndex = start;
 		(fBlocks+i)->eIndex = end;
 		remChars=size-end;
@@ -150,6 +190,17 @@ int findOffsets(char *fileContent, int threadCount,struct block * fBlocks ) {
         }
 
         return size;
+}
+int hashFunc(int year,char *country) {
+	
+	int hashVal=0,i=0;
+	for(i=0; i<strlen(country); i++) {
+		hashVal += country[i] * (i+1) ;
+	}
+
+	hashVal+=year;
+	hashVal = hashVal%HASH_TABLE_SIZE;
+	return hashVal;	
 }
 bool removeLowerRatingFromList(int index , char *country,long int numVotes , int rating , int year ) {
         if(hashTable[index].end == NULL){
@@ -164,9 +215,13 @@ bool removeLowerRatingFromList(int index , char *country,long int numVotes , int
 		    ( temp->rating < rating || \
 		      (temp->rating == rating && temp->numVotes < numVotes))  ) {
                         if(prev == NULL){
+				
                                 hashTable[index].begin = hashTable[index].begin->next;
+				if (hashTable[index].begin == NULL)
+					hashTable[index].end = NULL;
                                 free(temp);
-                                return true;
+//                                return true;
+				continue;
                                 }
 
                         if(temp->next == NULL){
@@ -184,33 +239,116 @@ bool removeLowerRatingFromList(int index , char *country,long int numVotes , int
 }
 
 
-bool insert(int index,char *movie,char *country,long int numVotes,int rating,int year) {
+//bool insert(int index,char *movie,char *country,long int numVotes,int rating,int year) {
+bool insert(char *movie,char *country,char *numVotes,char *rating,char *year) {
         bool success = false;
 
 	bool flag = false;
-        Node *new = NULL;
-        new = malloc(sizeof(Node));
-        if(new == NULL){
-                fprintf(stderr,"addToList: Malloc failed");
-                return false;
-        }
-
-	strcpy(new->movie , movie);
-	strcpy(new->country , country);
-	new->numVotes = numVotes;
-	new->rating = rating;
-	new->year = year;
-	new->next = NULL;
 
 	
 
+	long int nVotes = atol(numVotes);
+	int r = atoi(rating);
+	int yr = atoi(year);
+	int index;
+	index = hashFunc(yr,country);	
+
+	lll_lock(&hashLock);
 
 	if ( hashTable[index].begin == NULL || hashTable[index].end == NULL ) {
+		Node *new = NULL;
+		new = malloc(sizeof(Node));
+		if(new == NULL){
+			fprintf(stderr,"addToList: Malloc failed");
+			return false;
+		}
+
+		strcpy(new->movie , movie);
+		strcpy(new->country , country);
+		new->numVotes = nVotes;
+		new->rating = r ;
+		new->year = yr ;
+		new->next = NULL;
+
+
 		hashTable[index].begin = new;
 		hashTable[index].end = new;
 	} else {
+		Node *temp = hashTable[index].begin;
 
-		removeLowerRatingFromList(index,country,numVotes,rating,year);
+		while(temp!=NULL) {
+
+			if( strcmp(temp->country,country) == 0 && temp->year == yr ) {
+				if ( (temp->rating < r ) ||   (temp->rating == r && temp->numVotes < nVotes ) )  {
+
+#ifdef DEBUG
+					printf("Replacing with new movie : %s\n" ,movie );
+#endif
+					// Update the existing entry with the high ranking entry
+					strcpy(temp->movie,movie);
+					temp->numVotes = nVotes;
+					temp->rating = r;
+
+					// Remove existing entries with old values which are lower
+					Node *t = temp->next ;
+					Node *prev = temp;
+					Node *toRemove;
+					while( t!= NULL ) {
+
+						if ( strcmp(t->country,country)==0 && t->year == yr ) {
+							toRemove = t;
+						
+							if(hashTable[index].end == toRemove) {
+								hashTable[index].end = prev;
+								lll_unlock(&hashLock);
+								// Reached end so return from the function
+								return true;
+							}
+							prev->next = t->next;	
+							t=t->next;
+							free(toRemove);
+							
+						} else {
+							prev = t;
+							t = t->next;
+						}
+					}
+
+
+				} else if ( temp->rating == r && temp->numVotes == nVotes  ) {
+					Node *new = NULL;
+					new = malloc(sizeof(Node));
+					if(new == NULL){
+						fprintf(stderr,"addToList: Malloc failed");
+						lll_unlock(&hashLock);
+						return false;
+					}
+
+					strcpy(new->movie , movie);
+					strcpy(new->country , country);
+					new->numVotes = nVotes;
+					new->rating = r ;
+					new->year = yr ;
+					new->next = NULL;
+#ifdef DEBUG
+					printf("Adding at the end : %s %d %ld\n",movie,r,nVotes);
+#endif
+		
+					hashTable[index].end->next = new;
+					hashTable[index].end = hashTable[index].end->next;
+
+					lll_unlock(&hashLock);
+					// New node is inserted . Job is done so return
+					return true;
+				} 
+
+
+			}
+				temp = temp->next;
+		}
+		
+/*old
+		removeLowerRatingFromList(index,country,new->numVotes,new->rating,new->year);
 
 		if ( hashTable[index].begin == NULL || hashTable[index].end == NULL ) {
 			hashTable[index].begin = new;
@@ -220,7 +358,10 @@ bool insert(int index,char *movie,char *country,long int numVotes,int rating,int
 			hashTable[index].end->next = new;
 			hashTable[index].end = hashTable[index].end->next ;
 		}
+
+*/
 	}
+	lll_unlock(&hashLock);
         return true;
 }
 
@@ -237,19 +378,93 @@ void print() {
 
 }
 
-int hashFunc(int year,char *country) {
+
+
+void *threadFunc( void *info ) {
+	ThreadInfo *tInfo = (ThreadInfo *)info;
+
+
+#ifdef DEBUG
+	printf("Country:%s ThreadNum:%d\n",countries[tInfo->countryIndex],tInfo->threadId);
+#endif
+	int index = tInfo->threadId;
+	int cIndex = tInfo->countryIndex;
+	char movie[MAX_MOVIE_LEN];
+	char country[MAX_COUNTRY_LEN];
+	char votes[10];
+	char rating[5];
+	char year[5];
 	
-	int hashVal=0,i=0;
-	for(i=0; i<strlen(country); i++) {
-		hashVal += country[i] * (i+1) ;
-	}
+	int start = offsets[cIndex][index].sIndex;
+	int end = offsets[cIndex][index].eIndex;
 
-	hashVal+=year;
-	hashVal = hashVal%HASH_TABLE_SIZE;
-	return hashVal;	
-}
+	if(start == 0 || end == 0)
+		return;
+	int i=0;
+	do {
 
-void *threadFunc() {
+		pthread_mutex_lock(&debugLock);
+		printf("id : %d Start : %d End : %d \n",index,start,end);
+		pthread_mutex_unlock(&debugLock);
+		//Fetch Movie Name
+		while(buffer[cIndex][start] != ':' ) {
+			movie[i] = buffer[cIndex][start];
+			i++;
+			start++;
+		}
+		movie[i] = '\0';
+		i=0;
+		start++;
+
+		//Fetch number of votes
+                while(buffer[cIndex][start] != ':' ) {
+                        votes[i] = buffer[cIndex][start];
+                        i++;
+                        start++;
+                }
+                votes[i] = '\0';
+                i=0;
+		start++;
+
+		//Fetch rating
+                while(buffer[cIndex][start] != ':' ) {
+                        rating[i] = buffer[cIndex][start];
+                        i++;
+                        start++;
+                }
+                rating[i] = '\0';
+                i=0;
+                start++;
+
+
+		//Fetch year
+                while(buffer[cIndex][start] != ':' ) {
+                        year[i] = buffer[cIndex][start];
+                        i++;
+                        start++;
+                }
+                year[i] = '\0';
+                i=0;
+                start++;
+
+		//Fetch country
+                while(buffer[cIndex][start] != '\n' && start <= end ) {
+                        country[i] = buffer[cIndex][start];
+                        i++;
+                        start++;
+                }
+                country[i] = '\0';
+                i=0;
+		start++;
+	
+#ifdef DEBUG
+		printf("=================\n");
+		printf("Movie:%s\nVotes:%s\nRating:%s\nYear:%s\nCountry:%s\n",movie,votes,rating,year,country);
+#endif			
+
+		insert(movie,country,votes,rating,year);
+
+	} while( start<end ); 	
 
 }
 
@@ -267,6 +482,7 @@ int main() {
 	}
 #endif
 
+
 	
 	for(i=0;i<numCountries;i++ )	 {
 		findOffsets(buffer[i],NUM_THREADS_PER_COUNTRY,offsets[i]);
@@ -281,21 +497,58 @@ int main() {
 		}
 	}
 #endif
+/*
+	insert(0,"movie","country","90000","7","2009");
+	insert(0,"movie","country","90000","8","2009");
+	insert(0,"movie1","country1","90000","7","2009");
 
-	insert(0,"movie","country",90000,7,2009);
-	insert(0,"movie","country",90000,8,2009);
-/*	insert(0,"movie1","country1",90000,7,2009);
+//	insert(0,"movie2","country2",90000,7,2009);
+//	insert(1,"movie2","country2",90000,7,2009);
 
-	insert(0,"movie2","country2",90000,7,2009);
-	insert(1,"movie2","country2",90000,7,2009);
-*/
 	print();
 
-/*
+
 	printf("hash of india ,1965 : %d\n",hashFunc(1965,"india"));
 	printf("hash of USA ,1965 : %d\n",hashFunc(1965,"USA"));
 	printf("hash of china ,1965 : %d\n",hashFunc(1965,"china"));
 	printf("hash of japan ,1965 : %d\n",hashFunc(1965,"japan"));
 	printf("hash of napaj ,1965 : %d\n",hashFunc(1965,"napaj"));*/
+
+
+	ThreadInfo tInfo[MAX_NUM_COUNTRY][NUM_THREADS_PER_COUNTRY];
+	pthread_t tid[MAX_NUM_COUNTRY][NUM_THREADS_PER_COUNTRY];
+
+	for(i=0;i<numCountries;i++) {
+		for(j=0;j<NUM_THREADS_PER_COUNTRY;j++) {
+			tInfo[i][j].countryIndex = i ;
+			tInfo[i][j].threadId = j;
+			pthread_create(&tid[i][j],NULL,threadFunc,(void*)&tInfo[i][j] );
+		}
+
+	}
+
+
+        for(i=0;i<numCountries;i++) {
+                for(j=0;j<NUM_THREADS_PER_COUNTRY;j++) {
+			pthread_join(tid[i][j],NULL);
+		}
+	}
+
+
+
+/*	printf("----------");
+	for(i=382;i<=563;i++) 
+		printf("%c",buffer[0][i]);
+
+
+//	findOffsets(buffer[2],NUM_THREADS_PER_COUNTRY,offsets[i]);
+	ThreadInfo tInfo;
+	tInfo.countryIndex = 0;
+	tInfo.threadId = 4;
+	threadFunc((void *)&tInfo);
+
+//	printf("%s\n",buffer[0]+382);
+*/
+	print();
 	
 }
