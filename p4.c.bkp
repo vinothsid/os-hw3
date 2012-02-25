@@ -12,12 +12,8 @@
 #define MAX_BUFFER_SIZE 1024*1024*10 // 10 mb
 #define HASH_TABLE_SIZE 257
 
-#define print(string) write(1,string,strlen(string))
-
-//#define DEBUG
-//#define VERBOSE
-
 pthread_mutex_t debugLock = PTHREAD_MUTEX_INITIALIZER;
+#define DEBUG
 
 struct block {
         int sIndex;
@@ -25,28 +21,22 @@ struct block {
 } offsets[MAX_NUM_COUNTRY][NUM_THREADS_PER_COUNTRY] ;
 
 
-struct movieInfo {
-        long int numVotes;
-        int rating;
-        char movie[MAX_MOVIE_LEN];
-};
-
 struct node {
-	int year;
+	char movie[MAX_MOVIE_LEN];
 	char country[MAX_COUNTRY_LEN];
-	struct movieInfo *m;
+	long int numVotes;
+	int rating;
+	int year;
 	struct node *next;
 };
 
 typedef struct node Node; 
 
-Node *hashTable[HASH_TABLE_SIZE];
-/*
 struct hashNode {
 	Node *begin;
 	Node *end;
 } hashTable[HASH_TABLE_SIZE];
-*/
+
 
 struct threadInfo {
 	int countryIndex;
@@ -212,7 +202,6 @@ int hashFunc(int year,char *country) {
 	hashVal = hashVal%HASH_TABLE_SIZE;
 	return hashVal;	
 }
-/*
 bool removeLowerRatingFromList(int index , char *country,long int numVotes , int rating , int year ) {
         if(hashTable[index].end == NULL){
                 return false;
@@ -248,15 +237,13 @@ bool removeLowerRatingFromList(int index , char *country,long int numVotes , int
         }
         return false;
 }
-*/
 
 
 //bool insert(int index,char *movie,char *country,long int numVotes,int rating,int year) {
 bool insert(char *movie,char *country,char *numVotes,char *rating,char *year) {
         bool success = false;
 
-	bool newFlag = false;
-	bool updateFlag = false;
+	bool flag = false;
 
 	
 
@@ -264,155 +251,99 @@ bool insert(char *movie,char *country,char *numVotes,char *rating,char *year) {
 	int r = atoi(rating);
 	int yr = atoi(year);
 	int index;
-	index = hashFunc(yr,country);
+	index = hashFunc(yr,country);	
 
-	struct movieInfo *m1 = NULL ,  *oldVal=NULL;
-	m1 = malloc(sizeof(struct movieInfo));
-	if(m1 == NULL) {
-		fprintf(stderr,"insert : malloc failed");
-		return false;
-	}
+	lll_lock(&hashLock);
 
-	// m1 is used to update the entry with higher rated movie
-        strcpy(m1->movie , movie);
-        m1->numVotes = nVotes;
-        m1->rating = r ;
-
-
-	// new is used in case of new element in the hash index or same rated entry added in the collision linked list	
-	Node *new = NULL;
-	new = malloc(sizeof(Node));
-	if(new == NULL) {
-		fprintf(stderr,"insert: Malloc failed");
-		return false;
-	}
-
-	strcpy(new->country , country);
-	new->m = m1;
-        new->year = yr ;
-	new->next = NULL;
-
-	Node *temp = NULL;
-
-	while( success == false) {
-
-	if ( hashTable[index] == NULL  ) {
-//compareandswapptr(&hashTable[index].begin,NULL,new) .if fails go up and try again.move the memory allocation outside
-
-//		hashTable[index].begin = new;
-//		hashTable[index].end = new;
-		if( compare_and_swap(&hashTable[index],new,NULL) == NULL) {
-			success = true;
-			newFlag = true;
-			break;
-		} else {
-#ifdef VERBOSE
-			print("CAS failed: While adding new node\n");			
-#endif		
-			continue;	
+	if ( hashTable[index].begin == NULL || hashTable[index].end == NULL ) {
+		Node *new = NULL;
+		new = malloc(sizeof(Node));
+		if(new == NULL){
+			fprintf(stderr,"addToList: Malloc failed");
+			return false;
 		}
 
+		strcpy(new->movie , movie);
+		strcpy(new->country , country);
+		new->numVotes = nVotes;
+		new->rating = r ;
+		new->year = yr ;
+		new->next = NULL;
+
+
+		hashTable[index].begin = new;
+		hashTable[index].end = new;
 	} else {
+		Node *temp = hashTable[index].begin;
 
-		temp = hashTable[index];
-		oldVal = temp->m;  // checked later when adding multiple entries with same rating and during updating 
-		if ( compare_and_swap(&(temp),hashTable[index] , hashTable[index]) != hashTable[index] ) {
-			continue;
-		}
 		while(temp!=NULL) {
 
 			if( strcmp(temp->country,country) == 0 && temp->year == yr ) {
-				if ( (oldVal->rating < r ) ||   (oldVal->rating == r && oldVal->numVotes < nVotes ) )  {
+				if ( (temp->rating < r ) ||   (temp->rating == r && temp->numVotes < nVotes ) )  {
 
 #ifdef DEBUG
 					printf("Replacing with new movie : %s\n" ,movie );
 #endif
 					// Update the existing entry with the high ranking entry
-
-
-					if(compare_and_swap(&(temp->m),m1,oldVal) == oldVal ) {
-						updateFlag = true;			
-						success = true;	
-					} else {
-#ifdef VERBOSE
-	                        		print("CAS failed: While updating node\n");
-#endif						
-						break;
-
-					}
+					strcpy(temp->movie,movie);
+					temp->numVotes = nVotes;
+					temp->rating = r;
 
 					// Remove existing entries with old values which are lower
 					Node *t = temp->next ;
-					Node *prev ;
+					Node *prev = temp;
 					Node *toRemove;
+					while( t!= NULL ) {
 
-					if(t!=NULL) { 
-						if( compare_and_swap(&(hashTable[index]->m),m1,m1) != m1 ) {
-							updateFlag=false;
-							break; // some other thread has updated the value .. let that thread remove the old entries
-
-						}
-						lll_lock(&hashLock);
-						Node *t1 = temp->next; // setting again since some other threads might have already removed lower rating movies
-						prev=temp;
-			
-						while( t!= NULL && t1 == t ) { // if some other thread have removed and inserted some other new node then t1 == t condition will fail
-
-							if ( strcmp(t->country,country)==0 && t->year == yr ) {
-								toRemove = t;
-							
-#ifdef DEBUG
-								printf("Removing old movie : %s\n" ,toRemove->m->movie );
-#endif
-								prev->next = t->next;	
-								t=t->next;
-								free(toRemove);
-								
-							} else {
-								prev = t;
-								t = t->next;
+						if ( strcmp(t->country,country)==0 && t->year == yr ) {
+							toRemove = t;
+						
+							if(hashTable[index].end == toRemove) {
+								hashTable[index].end = prev;
+								lll_unlock(&hashLock);
+								// Reached end so return from the function
+								return true;
 							}
+							prev->next = t->next;	
+							t=t->next;
+							free(toRemove);
+							
+						} else {
+							prev = t;
+							t = t->next;
 						}
-
-						lll_unlock(&hashLock);
 					}
 
-				} else if ( oldVal->rating == r && oldVal->numVotes == nVotes  ) {
+
+				} else if ( temp->rating == r && temp->numVotes == nVotes  ) {
+					Node *new = NULL;
+					new = malloc(sizeof(Node));
+					if(new == NULL){
+						fprintf(stderr,"addToList: Malloc failed");
+						lll_unlock(&hashLock);
+						return false;
+					}
+
+					strcpy(new->movie , movie);
+					strcpy(new->country , country);
+					new->numVotes = nVotes;
+					new->rating = r ;
+					new->year = yr ;
+					new->next = NULL;
 #ifdef DEBUG
 					printf("Adding at the end : %s %d %ld\n",movie,r,nVotes);
 #endif
-					lll_lock(&hashLock);
-					if( compare_and_swap(&(hashTable[index]->m),oldVal,oldVal) != oldVal ) {
-						lll_unlock(&hashLock);
-						success = true;
-                                                break; // some other thread has updated the value ..
+		
+					hashTable[index].end->next = new;
+					hashTable[index].end = hashTable[index].end->next;
 
-                                        }
-
-
-					Node *p = hashTable[index];
-					while(p->next != NULL)
-						p=p->next;
-
-					p->next = new ;
-					newFlag=true; // new node is used . if this flag is false then new can be freed.
 					lll_unlock(&hashLock);
-					success = true;
-					break;
 					// New node is inserted . Job is done so return
-				} else {
-					success = true; // new node rating is lower than existing one
+					return true;
 				} 
 
 
 			}
-
-				if(success==true)
-					break;
-
-				if( compare_and_swap(&(hashTable[index]->m),oldVal,oldVal) != oldVal ) { // if value is updated then start again
-					break; // break out of inner loop and success value will still be false so it will continue the process again
-				}
 				temp = temp->next;
 		}
 		
@@ -430,25 +361,17 @@ bool insert(char *movie,char *country,char *numVotes,char *rating,char *year) {
 
 */
 	}
-	
-
-	}
-
-/*
-	if(updateFlag == false)
-		free(m1);
-	if(newFlag == false)
-		free(new); */ 
+	lll_unlock(&hashLock);
         return true;
 }
 
-void printFunc() {
+void print() {
 	int i=0;
 	Node *p;
 	for(i=0;i< HASH_TABLE_SIZE; i++ ) {
-		p=hashTable[i];
+		p=hashTable[i].begin;
 		while(p != NULL) {
-			printf("%d => %s:%s:%ld:%d:%d\n",i,p->m->movie,p->country,p->m->numVotes,p->m->rating,p->year);
+			printf("%d => %s:%s:%ld:%d:%d\n",i,p->movie,p->country,p->numVotes,p->rating,p->year);
 			p=p->next;
 		}
 	}
@@ -475,13 +398,14 @@ void *threadFunc( void *info ) {
 	int start = offsets[cIndex][index].sIndex;
 	int end = offsets[cIndex][index].eIndex;
 
-	if(start == 0 && end == 0)
+	if(start == 0 || end == 0)
 		return;
 	int i=0;
 	do {
 
-//		pthread_mutex_lock(&debugLock);
-//		pthread_mutex_unlock(&debugLock);
+		pthread_mutex_lock(&debugLock);
+		printf("id : %d Start : %d End : %d \n",index,start,end);
+		pthread_mutex_unlock(&debugLock);
 		//Fetch Movie Name
 		while(buffer[cIndex][start] != ':' ) {
 			movie[i] = buffer[cIndex][start];
@@ -625,6 +549,6 @@ int main() {
 
 //	printf("%s\n",buffer[0]+382);
 */
-	printFunc();
+	print();
 	
 }
