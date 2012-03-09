@@ -13,12 +13,14 @@
 
 pthread_mutex_t insertMutex;
 pthread_mutex_t mutex;
+pthread_mutex_t activeDel_lock;
 
 
-pthread_cond_t mutex_cond = PTHREAD_COND_INITIALIZER;
+//pthread_cond_t mutex_cond = PTHREAD_COND_INITIALIZER;
 
 int active = 0;
 int activeDeletes = 0;
+int cond_spin = 1;
 
 typedef struct list{
 char *item;
@@ -71,7 +73,7 @@ void printList(){
 
 	printf("==============\n");
 	while(temp!=NULL){
-		printf("%s\n" , temp->item);
+		printf("%s" , temp->item);
 		temp = temp->next;
 	}
 }
@@ -128,6 +130,7 @@ bool searchList(char *item){
 void printThreadInfo(char* operation, char* value, bool success, pthread_t tid){
 	int len = strlen(value);
 	value[len-1] = '\0'; //remove the endline char
+	value[len-2] = '\0'; //remove the endline char
 	if(success)
 		printf("[%08x]    Success %s [ %s ] Retrievers : %i Adders : %i Removers : %i\n" ,tid, operation,value,searchThreads,insertThreads,deleteThreads);
 	else	
@@ -150,9 +153,11 @@ void *searcher(void *args){
 	active = active - 1;
 	searchThreads = searchThreads - 1;
 	if(active == 0 && activeDeletes>0){
-		for(k=0;k<activeDeletes;k++)
+	/*	for(k=0;k<activeDeletes;k++)
 			pthread_cond_signal(&mutex_cond);
-		}
+		}*/
+		pthread_kill(pthread_self(),SIGUSR1);
+	}
 	pthread_mutex_unlock(&mutex);
 }
 
@@ -171,8 +176,10 @@ int k;
 	active = active - 1;
 	insertThreads = insertThreads - 1;
 	if(active == 0 && activeDeletes>0){
-		for(k=0;k<activeDeletes;k++)
+/*		for(k=0;k<activeDeletes;k++)
 			pthread_cond_signal(&mutex_cond); 
+*/
+		pthread_kill(pthread_self(),SIGUSR1);
 	}
 	pthread_mutex_unlock(&mutex);
 pthread_mutex_unlock(&insertMutex);
@@ -181,9 +188,18 @@ pthread_mutex_unlock(&insertMutex);
 void * deleter(void *args){
 pthread_mutex_lock(&mutex); 
 	while(active != 0){
+		pthread_mutex_lock(&activeDel_lock);
 		activeDeletes = activeDeletes + 1;
-		pthread_cond_wait(&mutex_cond,&mutex); //atomically(release lock,spin here on some lock
+		pthread_mutex_unlock(&activeDel_lock);
+//		pthread_cond_wait(&mutex_cond,&mutex); //atomically(release lock,spin here on some lock
+		pthread_mutex_unlock(&mutex);
+		while(cond_spin);
+		
+		pthread_mutex_lock(&activeDel_lock);
 		activeDeletes = activeDeletes-1;
+		pthread_mutex_unlock(&activeDel_lock);
+
+		pthread_mutex_lock(&mutex);
 		}
 	deleteThreads = deleteThreads + 1;
 	char* temp = (char*)args;
@@ -197,6 +213,16 @@ void initialize(void)
 {
 	pthread_mutex_init(&mutex, NULL);
 	pthread_mutex_init(&insertMutex, NULL);
+	pthread_mutex_init(&activeDel_lock, NULL);
+}
+
+void signal_handler() {
+//      pthread_mutex_lock(&cond_mutex);
+        cond_spin = 0;
+        while(activeDeletes!=0);
+        cond_spin=1;
+//      pthread_mutex_unlock(&cond_mutex);
+
 }
 
 
@@ -208,6 +234,16 @@ int main(int argc , char** argv){
 	int l;
 	int j;
 	int len;
+
+        struct sigaction cond_action;
+
+        sigemptyset(&cond_action.sa_mask);
+        sigaddset(&cond_action.sa_mask,SIGUSR1);
+        cond_action.sa_flags = SA_RESTART;
+	cond_action.sa_handler = signal_handler;
+
+        sigaction(SIGUSR1,&cond_action,NULL);
+
 
 	setbuf(stdout,NULL);
 
