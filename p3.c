@@ -73,7 +73,7 @@ void printList(){
 
 	printf("==============\n");
 	while(temp!=NULL){
-		printf("%s\n" , temp->item);
+		printf("%s" , temp->item);
 		temp = temp->next;
 	}
 }
@@ -132,7 +132,9 @@ void printThreadInfo(char* operation, char* value, bool success, pthread_t tid){
 	/*if(value[len-2] == '\r')
 		printf("CR found\n");*/
 	value[len-1] = '\0'; //remove the endline char
-	value[len-2] = '\0'; //remove the carriage return char
+	if( value[len-2] == '\r')	
+		value[len-2] = '\0'; //remove the carriage return char
+
 	if(success)
 		printf("[%08x]    Success %s [ %s ] Retrievers : %i Adders : %i Removers : %i\n" ,tid, operation,value,searchThreads,insertThreads,deleteThreads);
 	else	

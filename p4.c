@@ -99,14 +99,15 @@ int getCountries(char *fileName) {
 #ifdef DEBUG
 	printf("Countries:\n=========================\n");
 #endif
-        while(i < MAX_NUM_COUNTRY && fscanf(fp,"%[^\n]\n",countries[i++])==1 ) {
+        while(i < MAX_NUM_COUNTRY && fscanf(fp,"%[^\n]\n",countries[i])==1 ) {
 #ifdef DEBUG
 		printf("%s\n",countries[i-1]);
 #endif
+		i++;
 	}
 
         fclose(fp);
-        return i-1;
+        return i;
 }
 
 int searchCountry(char *c) {
@@ -646,12 +647,17 @@ void *threadFunc( void *info ) {
 
 }
 
-int main() {
+int main(int argc,char *argv[]) {
 
+
+	if( argc!= 3 ) {
+		printf("Usage: ./a4 country_file.txt list_of_files.txt\n");
+		exit(1);
+	}
 
 	init_locks();
-	numCountries = getCountries("countries.txt");
-	fillBuffer("p4-in.txt");
+	numCountries = getCountries(argv[1]);
+	fillBuffer(argv[2]);
 
 	int i=0,j=0;
 #ifdef DEBUG
